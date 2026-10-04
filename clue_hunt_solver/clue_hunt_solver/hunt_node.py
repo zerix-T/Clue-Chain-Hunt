@@ -35,10 +35,23 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import String
 
+from cv_bridge import CvBridge
+import numpy as np
+import cv2
+
 
 class HuntNode(Node):
     def __init__(self):
         super().__init__('hunt_node')
+
+        self.bridge = CvBridge()
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        self.qr_detector = cv2.QRCodeDetector()
+        self.set_qr_frame()
+
+
         self.create_subscription(Image, '/camera/image_raw', self.on_image, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, '/camera/camera_info', self.on_info, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
@@ -48,11 +61,74 @@ class HuntNode(Node):
         self.status_pub = self.create_publisher(String, '/leader/status', 10)
         self.get_logger().info('hunt_node started - time to write some code!')
 
+    def set_qr_frame(self):
+        self.qr_size = 300
+        QR_X = 1.20
+        QR_Y = 0.0
+        QR_W = 1.1
+        QR_H = 1.0
+        self.qr_points = np.array(
+                    [[QR_X,     QR_Y],
+                    [QR_X + QR_W, QR_Y],
+                    [QR_X + QR_W, QR_Y + QR_H],
+                    [QR_X,     QR_Y + QR_H]],
+                    dtype=np.float32)
+        self.qr_start_src = np.array(
+                    [[0, 0],
+                    [1, 0],
+                    [1, 1],
+                    [0, 1]],
+                    dtype=np.float32)
+        self.qr_dest  = np.array(
+                    [[0, 0],
+                    [self.qr_size - 1, 0],
+                    [self.qr_size - 1, self.qr_size - 1],
+                    [0, self.qr_size - 1]],
+                    dtype=np.float32)
+
+    def get_qr_from_aruco(self, frame, aruco_corners):
+        corners = np.asarray(aruco_corners, dtype=np.float32)
+
+        # Normalized marker coordinates -> image coordinates
+        H = cv2.getPerspectiveTransform(self.qr_start_src, corners)
+
+        # QR coordinates -> image coordinates
+        qr_image_points = cv2.perspectiveTransform(self.qr_points[None, :, :], H)[0]
+
+        qr_H = cv2.getPerspectiveTransform(qr_image_points, self.qr_dest)
+
+        qr = cv2.warpPerspective(frame, qr_H, (self.qr_size, self.qr_size))
+
+        return qr, qr_image_points
+
+
     def on_image(self, msg):
         # TODO 1: convert to OpenCV (cv_bridge), detect ArUco markers (DICT_4X4_50, 0.24 m).
         #         Several boards can carry the SAME id (look-alikes).
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().error(f'CV Bridge error: {e}')
+            return
+
+        corners, ids, rejected = self.aruco_detector.detectMarkers(frame)
+        
         # TODO 2: decode the QR code next to the marker (cv2.QRCodeDetector) and check the token
-        pass
+        if ids is not None:
+            for marker_corners, marker_id in zip(corners, ids):
+                aruco_pts = marker_corners[0]
+                qr, qr_points = self.get_qr_from_aruco(frame, aruco_pts)
+
+                data, points, _ = self.qr_detector.detectAndDecode(qr)
+                if data:
+                    self.get_logger().info(f"QR: {data}")
+
+                # Visualization
+                cv2.polylines(frame, [qr_points.astype(np.int32)], True, (0, 255, 0), 2)
+                cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([marker_id]))
+                
+        cv2.imshow("hunt cam", frame)
+        cv2.waitKey(1)
 
     def on_info(self, msg):
         # TODO: keep the camera matrix K for solvePnP
