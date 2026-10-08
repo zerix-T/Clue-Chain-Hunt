@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'hunt_node = clue_hunt_solver.hunt_node:main',
             'follower_node = clue_hunt_solver.follower_node:main',
+            'pub_goal_node = clue_hunt_solver.pub_goal:main',
         ],
     },
 )
